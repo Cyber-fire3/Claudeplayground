@@ -1,8 +1,7 @@
 # ── AI Agent (n8n_ai_agent_node.py) ─────────────────────────────────────────
-openai>=1.0.0                        # OpenAI, Azure, Ollama-compatible, and Gemini backends
+openai>=1.0.0                        # OpenAI, Azure, and Ollama-compatible backends
 anthropic>=0.25.0                    # Anthropic Claude backend
-# Note: GeminiBackend uses the openai package pointed at Google's endpoint,
-#       no google-generativeai SDK required.
+google-generativeai>=0.8.0           # Gemini backend (native SDK, required for search grounding)
 
 # ── Google Drive (google_drive_api.py) ──────────────────────────────────────
 google-api-python-client>=2.0.0

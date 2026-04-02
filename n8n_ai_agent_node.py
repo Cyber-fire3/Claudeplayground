@@ -384,27 +384,180 @@ class OllamaBackend(OpenAIBackend):
         super().__init__(api_key, settings)
 
 
-class GeminiBackend(OpenAIBackend):
+def _json_schema_to_gemini(schema: dict):
+    """Recursively convert a JSON Schema dict to a google.generativeai protos.Schema."""
+    import google.generativeai as genai
+
+    TYPE_MAP = {
+        "object":  genai.protos.Type.OBJECT,
+        "string":  genai.protos.Type.STRING,
+        "number":  genai.protos.Type.NUMBER,
+        "integer": genai.protos.Type.INTEGER,
+        "boolean": genai.protos.Type.BOOLEAN,
+        "array":   genai.protos.Type.ARRAY,
+    }
+    return genai.protos.Schema(
+        type=TYPE_MAP.get(schema.get("type", "string"), genai.protos.Type.STRING),
+        description=schema.get("description", ""),
+        properties={k: _json_schema_to_gemini(v) for k, v in schema.get("properties", {}).items()} or None,
+        required=schema.get("required", []),
+        items=_json_schema_to_gemini(schema["items"]) if "items" in schema else None,
+    )
+
+
+def _messages_to_gemini(messages: list[Message]) -> list:
     """
-    Backend for Google Gemini models.
+    Convert our internal Message list to Gemini's content format.
 
-    Uses Google's OpenAI-compatible endpoint so all tool-calling logic
-    (function declarations, ReAct loop, result injection) is inherited
-    from OpenAIBackend without any changes.
+    Reconstructs function_call / function_response part pairs from the
+    [tool_call:name] assistant messages the ReAct loop stores in memory.
+    """
+    import re
+    import json as _json
 
-    Requires: pip install openai   (no google-generativeai SDK needed)
+    contents = []
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+
+        if m.role == "system":
+            i += 1
+            continue
+
+        if m.role == "user":
+            contents.append({"role": "user", "parts": [m.content]})
+            i += 1
+
+        elif m.role == "assistant":
+            match = re.match(r"\[tool_call:(\w+)\]\s*(.*)", m.content, re.DOTALL)
+            if match:
+                import google.generativeai as genai
+                fname, fargs = match.group(1), _json.loads(match.group(2))
+
+                contents.append({
+                    "role": "model",
+                    "parts": [genai.protos.Part(
+                        function_call=genai.protos.FunctionCall(name=fname, args=fargs)
+                    )],
+                })
+
+                # Consume the following tool-result messages
+                tool_parts = []
+                j = i + 1
+                while j < len(messages) and messages[j].role == "tool":
+                    tool_parts.append(genai.protos.Part(
+                        function_response=genai.protos.FunctionResponse(
+                            name=fname,
+                            response={"result": messages[j].content},
+                        )
+                    ))
+                    j += 1
+
+                if tool_parts:
+                    contents.append({"role": "user", "parts": tool_parts})
+                i = j
+            else:
+                contents.append({"role": "model", "parts": [m.content]})
+                i += 1
+
+        else:  # "tool" messages consumed above
+            i += 1
+
+    return contents
+
+
+class GeminiBackend(AIBackend):
+    """
+    Backend for Google Gemini using the native google-generativeai SDK.
+
+    Requires: pip install google-generativeai
+
+    AISettings.extra options
+    ------------------------
+    use_search_grounding : bool
+        Toggle Gemini's built-in Google Search grounding (default False).
+        When True, the model can search the web natively — no external
+        search tool or API key needed.
+
+    Example
+    -------
+    AIAgentNode(
+        provider="gemini",
+        api_key="AIza...",
+        settings=AISettings(
+            model="gemini-2.0-flash",
+            extra={"use_search_grounding": True},
+        ),
+    )
 
     Default model: gemini-2.0-flash
     Other models:  gemini-2.0-flash-lite, gemini-1.5-pro, gemini-1.5-flash
     """
 
-    GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-
     def __init__(self, api_key: str, settings: AISettings | None = None) -> None:
         if settings is None:
             settings = AISettings(model="gemini-2.0-flash")
-        settings.extra.setdefault("base_url", self.GEMINI_BASE_URL)
         super().__init__(api_key, settings)
+
+    def _build_model(self, tools: list[Tool]):
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            raise ImportError("pip install google-generativeai")
+
+        genai.configure(api_key=self.api_key)
+
+        gemini_tools = []
+
+        # Native Google Search grounding — just a flag, no extra API key
+        if self.settings.extra.get("use_search_grounding", False):
+            gemini_tools.append({"google_search": {}})
+
+        # Custom function tools from the agent
+        if tools:
+            gemini_tools.append(genai.protos.Tool(
+                function_declarations=[
+                    genai.protos.FunctionDeclaration(
+                        name=t.name,
+                        description=t.description,
+                        parameters=_json_schema_to_gemini(t.parameters),
+                    )
+                    for t in tools
+                ]
+            ))
+
+        return genai.GenerativeModel(
+            model_name=self.settings.model,
+            system_instruction=self.settings.system_prompt,
+            tools=gemini_tools or None,
+            generation_config=genai.types.GenerationConfig(
+                temperature=self.settings.temperature,
+                max_output_tokens=self.settings.max_tokens,
+            ),
+        )
+
+    def chat(
+        self,
+        messages: list[Message],
+        tools: list[Tool],
+    ) -> tuple[str | None, list[dict] | None]:
+        model = self._build_model(tools)
+        contents = _messages_to_gemini(messages)
+        response = model.generate_content(contents)
+
+        fn_calls = [
+            {
+                "id": p.function_call.name,
+                "name": p.function_call.name,
+                "arguments": dict(p.function_call.args),
+            }
+            for p in response.parts
+            if hasattr(p, "function_call") and p.function_call.name
+        ]
+        if fn_calls:
+            return None, fn_calls
+
+        return response.text, None
 
 
 # ---------------------------------------------------------------------------
