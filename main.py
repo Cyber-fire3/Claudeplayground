@@ -15,12 +15,15 @@ from n8n_ai_agent_node import (
     OpenAIBackend,
     AnthropicBackend,
     OllamaBackend,
+    GeminiBackend,
     Tool,
     NoMemory,
     WindowBufferMemory,
     SummaryMemory,
     register_backend,
 )
+
+from web_search_tool import make_web_search_tool
 
 from google_drive_api import (
     GoogleDriveNode,

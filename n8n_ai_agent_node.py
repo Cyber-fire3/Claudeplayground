@@ -384,6 +384,29 @@ class OllamaBackend(OpenAIBackend):
         super().__init__(api_key, settings)
 
 
+class GeminiBackend(OpenAIBackend):
+    """
+    Backend for Google Gemini models.
+
+    Uses Google's OpenAI-compatible endpoint so all tool-calling logic
+    (function declarations, ReAct loop, result injection) is inherited
+    from OpenAIBackend without any changes.
+
+    Requires: pip install openai   (no google-generativeai SDK needed)
+
+    Default model: gemini-2.0-flash
+    Other models:  gemini-2.0-flash-lite, gemini-1.5-pro, gemini-1.5-flash
+    """
+
+    GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+    def __init__(self, api_key: str, settings: AISettings | None = None) -> None:
+        if settings is None:
+            settings = AISettings(model="gemini-2.0-flash")
+        settings.extra.setdefault("base_url", self.GEMINI_BASE_URL)
+        super().__init__(api_key, settings)
+
+
 # ---------------------------------------------------------------------------
 # Registry — map provider name → backend class
 # ---------------------------------------------------------------------------
@@ -392,6 +415,7 @@ _BACKEND_REGISTRY: dict[str, type[AIBackend]] = {
     "openai": OpenAIBackend,
     "anthropic": AnthropicBackend,
     "ollama": OllamaBackend,
+    "gemini": GeminiBackend,
 }
 
 
